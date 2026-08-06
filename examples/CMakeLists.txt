@@ -1,0 +1,5 @@
+add_executable(rectilinear3d_boolean_demo demo.cpp)
+target_link_libraries(rectilinear3d_boolean_demo PRIVATE rectilinear3d_boolean)
+
+add_executable(rectilinear3d_boolean_two_spheres_demo two_spheres_boolean_demo.cpp)
+target_link_libraries(rectilinear3d_boolean_two_spheres_demo PRIVATE rectilinear3d_boolean)
