@@ -6,23 +6,40 @@
 // ComputeBooleanOp3d, and exports the result two ways:
 //
 //   - .obj files (both individually and combined per step) for interactive
-//     inspection in obj_mesh_viewer -- there's no good 3D analog of the 2D
-//     step-by-step SVG grid diagram, so this is the primary way to actually
-//     look at the shapes from any angle.
+//     inspection in obj_mesh_viewer -- the primary way to actually look at
+//     the shapes from any angle.
 //   - single-mesh static .svg snapshots (common_geometry's fixed-view
 //     Mesh3d renderer), one per region, for embedding directly in the
 //     README the way levelset3d_polygon's sphere.svg/torus.svg already do.
+//   - a two-color combined .svg with the actual coordinate-compressed grid
+//     (ns_r3b::detail::CompressXCoordinates/Y/Z -- not a reimplementation)
+//     drawn as a wireframe cage on top, sharing the same camera projection
+//     as the solid meshes above (RotateYawPitch/painter's-algorithm/
+//     Lambertian-shading logic mirrored from common_geometry/src/svg.cpp,
+//     self-contained here rather than added to common_geometry, matching
+//     rectilinear2d_boolean's two_circles demo's own precedent).
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <fstream>
+#include <iomanip>
+#include <initializer_list>
 #include <iostream>
+#include <limits>
+#include <numeric>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "common_geometry/bbox.hpp"
 #include "common_geometry/mesh3d.hpp"
 #include "common_geometry/obj.hpp"
 #include "common_geometry/svg.hpp"
+#include "rectilinear3d_boolean/detail/coordinate_compression.hpp"
 #include "rectilinear3d_boolean/rectilinear3d_boolean.hpp"
 
 using ns_cg::BBox3d;
@@ -122,6 +139,206 @@ double TotalVolume(const std::vector<BBox3d>& boxes) {
   return total;
 }
 
+// A single mesh built from multiple box groups, each keeping its own
+// per-triangle color (12 triangles per box) -- BoxesToMesh/Combine only
+// produce one color for the whole mesh, which isn't enough to tell sphere
+// A's boxes apart from sphere B's in a combined render.
+struct ColoredMesh {
+  Mesh3d mesh;
+  std::vector<std::string> triangle_colors;
+};
+
+ColoredMesh CombineColored(
+    std::initializer_list<std::pair<const std::vector<BBox3d>*, std::string>>
+        groups) {
+  std::vector<Vec3d> vertices;
+  std::vector<std::array<std::size_t, 3>> triangles;
+  std::vector<std::string> colors;
+  for (const auto& group : groups) {
+    for (const auto& box : *group.first) {
+      const std::size_t triangles_before = triangles.size();
+      AppendBoxTriangles(box, vertices, triangles);
+      colors.insert(colors.end(), triangles.size() - triangles_before,
+                     group.second);
+    }
+  }
+  return ColoredMesh{Mesh3d(std::move(vertices), std::move(triangles)),
+                      std::move(colors)};
+}
+
+// -- Grid-overlay SVG rendering below, mirroring common_geometry's own
+// Mesh3d -> SVG pipeline (src/svg.cpp) so the wireframe grid lines up
+// exactly with the solid mesh's projection. Kept self-contained in this
+// example rather than folded into common_geometry, since it's a one-off
+// combination (per-triangle color + wireframe overlay) not needed by the
+// library's general SvgStyle-based API.
+
+Vec3d RotateYawPitch(const Vec3d& p, double yaw_degrees,
+                      double pitch_degrees) {
+  const double yaw = yaw_degrees * M_PI / 180.0;
+  const double pitch = pitch_degrees * M_PI / 180.0;
+  const Vec3d q(p.x() * std::cos(yaw) + p.z() * std::sin(yaw), p.y(),
+                -p.x() * std::sin(yaw) + p.z() * std::cos(yaw));
+  return Vec3d(q.x(), q.y() * std::cos(pitch) - q.z() * std::sin(pitch),
+               q.y() * std::sin(pitch) + q.z() * std::cos(pitch));
+}
+
+std::string ShadeHexColor(const std::string& hex, double intensity) {
+  intensity = std::clamp(intensity, 0.2, 1.0);
+  const int r = std::stoi(hex.substr(1, 2), nullptr, 16);
+  const int g = std::stoi(hex.substr(3, 2), nullptr, 16);
+  const int b = std::stoi(hex.substr(5, 2), nullptr, 16);
+  std::ostringstream os;
+  os << "#" << std::hex << std::setfill('0') << std::setw(2)
+     << static_cast<int>(r * intensity) << std::setw(2)
+     << static_cast<int>(g * intensity) << std::setw(2)
+     << static_cast<int>(b * intensity);
+  return os.str();
+}
+
+struct Pt2 {
+  double x, y;
+};
+
+struct Segment3 {
+  Vec3d a, b;
+};
+
+// The compressed grid's wireframe cage: x/y lines on the floor (z=z_min),
+// x/z lines on the back wall (y=y_max), and y/z lines on the side wall
+// (x=x_min) -- three visible faces of the grid's own bounding box, drawn
+// with the real compressed coordinate values.
+std::vector<Segment3> BuildGridWalls(const std::vector<double>& xs,
+                                      const std::vector<double>& ys,
+                                      const std::vector<double>& zs) {
+  std::vector<Segment3> segs;
+  const double x_min = xs.front(), x_max = xs.back();
+  const double y_min = ys.front(), y_max = ys.back();
+  const double z_min = zs.front(), z_max = zs.back();
+
+  for (double x : xs)
+    segs.push_back({Vec3d(x, y_min, z_min), Vec3d(x, y_max, z_min)});
+  for (double y : ys)
+    segs.push_back({Vec3d(x_min, y, z_min), Vec3d(x_max, y, z_min)});
+
+  for (double x : xs)
+    segs.push_back({Vec3d(x, y_max, z_min), Vec3d(x, y_max, z_max)});
+  for (double z : zs)
+    segs.push_back({Vec3d(x_min, y_max, z), Vec3d(x_max, y_max, z)});
+
+  for (double y : ys)
+    segs.push_back({Vec3d(x_min, y, z_min), Vec3d(x_min, y, z_max)});
+  for (double z : zs)
+    segs.push_back({Vec3d(x_min, y_min, z), Vec3d(x_min, y_max, z)});
+
+  return segs;
+}
+
+// Renders `colored_mesh` (painter's algorithm + Lambertian shading,
+// exactly as common_geometry's ToSvg(Mesh3d) does it) with the
+// coordinate-compressed grid's wireframe cage drawn on top, sharing the
+// same yaw/pitch rotation so the cage lines up with the geometry it was
+// computed from. The wireframe is drawn unconditionally on top (ignoring
+// the mesh's own depth order) -- an intentional simplification for
+// legibility, the same choice rectilinear2d_boolean's step diagrams make.
+void WriteGridOverlaySvg(const std::string& path,
+                          const ColoredMesh& colored_mesh,
+                          const std::vector<double>& xs,
+                          const std::vector<double>& ys,
+                          const std::vector<double>& zs,
+                          double target_width_px) {
+  constexpr double kYawDegrees = -35.0;
+  constexpr double kPitchDegrees = 20.0;
+  constexpr double kPadding = 10.0;
+
+  const Mesh3d& mesh = colored_mesh.mesh;
+  std::vector<Vec3d> rotated_vertices;
+  rotated_vertices.reserve(mesh.GetVertices().size());
+  for (const auto& v : mesh.GetVertices())
+    rotated_vertices.push_back(RotateYawPitch(v, kYawDegrees, kPitchDegrees));
+
+  const std::vector<Segment3> grid_segments = BuildGridWalls(xs, ys, zs);
+  std::vector<std::array<Vec3d, 2>> rotated_grid;
+  rotated_grid.reserve(grid_segments.size());
+  for (const auto& seg : grid_segments)
+    rotated_grid.push_back({RotateYawPitch(seg.a, kYawDegrees, kPitchDegrees),
+                             RotateYawPitch(seg.b, kYawDegrees, kPitchDegrees)});
+
+  double min_x = std::numeric_limits<double>::max();
+  double max_x = std::numeric_limits<double>::lowest();
+  double min_y = std::numeric_limits<double>::max();
+  double max_y = std::numeric_limits<double>::lowest();
+  const auto expand = [&](const Vec3d& p) {
+    min_x = std::min(min_x, p.x());
+    max_x = std::max(max_x, p.x());
+    min_y = std::min(min_y, p.y());
+    max_y = std::max(max_y, p.y());
+  };
+  for (const auto& p : rotated_vertices) expand(p);
+  for (const auto& seg : rotated_grid) {
+    expand(seg[0]);
+    expand(seg[1]);
+  }
+
+  const double view_w = (max_x - min_x) + 2.0 * kPadding;
+  const double view_h = (max_y - min_y) + 2.0 * kPadding;
+  const auto map = [&](const Vec3d& p) {
+    return Pt2{p.x() - min_x + kPadding, (max_y - p.y()) + kPadding};
+  };
+
+  std::vector<std::size_t> order(mesh.GetTriangles().size());
+  std::iota(order.begin(), order.end(), 0);
+  std::vector<double> avg_z(mesh.GetTriangles().size());
+  for (std::size_t t = 0; t < mesh.GetTriangles().size(); ++t) {
+    const auto& tri = mesh.GetTriangles()[t];
+    avg_z[t] = (rotated_vertices[tri[0]].z() + rotated_vertices[tri[1]].z() +
+                rotated_vertices[tri[2]].z()) /
+               3.0;
+  }
+  std::sort(order.begin(), order.end(),
+            [&](std::size_t a, std::size_t b) { return avg_z[a] < avg_z[b]; });
+
+  const Vec3d light_dir = Vec3d(-0.4, 0.6, 1.0).normalized();
+  const double seam_stroke_width = view_w * 0.0015;
+
+  std::ostringstream os;
+  const double aspect = view_w > 0.0 ? view_h / view_w : 1.0;
+  os << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" << target_width_px
+     << "\" height=\"" << target_width_px * aspect << "\" viewBox=\"0 0 "
+     << view_w << " " << view_h << "\">\n";
+
+  for (std::size_t t : order) {
+    const auto& tri = mesh.GetTriangles()[t];
+    const Vec3d& a = rotated_vertices[tri[0]];
+    const Vec3d& b = rotated_vertices[tri[1]];
+    const Vec3d& c = rotated_vertices[tri[2]];
+    const Vec3d normal = (b - a).cross(c - a).normalized();
+    const double intensity = 0.25 + 0.75 * std::max(normal.dot(light_dir), 0.0);
+    const std::string color =
+        ShadeHexColor(colored_mesh.triangle_colors[t], intensity);
+    const Pt2 p0 = map(a), p1 = map(b), p2 = map(c);
+    os << "  <polygon points=\"" << p0.x << "," << p0.y << " " << p1.x << ","
+       << p1.y << " " << p2.x << "," << p2.y << "\" fill=\"" << color
+       << "\" stroke=\"" << color << "\" stroke-width=\"" << seam_stroke_width
+       << "\"/>\n";
+  }
+
+  const double grid_stroke_width = view_w * 0.0025;
+  for (const auto& seg : rotated_grid) {
+    const Pt2 p0 = map(seg[0]);
+    const Pt2 p1 = map(seg[1]);
+    os << "  <line x1=\"" << p0.x << "\" y1=\"" << p0.y << "\" x2=\"" << p1.x
+       << "\" y2=\"" << p1.y << "\" stroke=\"#374151\" stroke-width=\""
+       << grid_stroke_width << "\" stroke-opacity=\"0.55\"/>\n";
+  }
+
+  os << "</svg>\n";
+
+  std::ofstream out(path);
+  if (!out) throw std::runtime_error("Failed to open file for writing: " + path);
+  out << os.str();
+}
+
 }  // namespace
 
 int main() {
@@ -147,6 +364,34 @@ int main() {
             << "," << center_b.z() << "), radius=" << radius << ", "
             << num_z_slices << "x" << num_y_slices << " slices ("
             << sphere_b.size() << " boxes)\n\n";
+
+  // The real algorithm's own coordinate-compressed grid -- not a
+  // reimplementation of it.
+  const std::vector<double> grid_x = ns_r3b::detail::CompressXCoordinates(
+      sphere_a, sphere_b, ns_r3b::kDefaultEpsilon);
+  const std::vector<double> grid_y = ns_r3b::detail::CompressYCoordinates(
+      sphere_a, sphere_b, ns_r3b::kDefaultEpsilon);
+  const std::vector<double> grid_z = ns_r3b::detail::CompressZCoordinates(
+      sphere_a, sphere_b, ns_r3b::kDefaultEpsilon);
+
+  const auto print_axis = [](const char* label,
+                              const std::vector<double>& coords) {
+    std::cout << "  " << label << " (" << coords.size() << "): ";
+    for (std::size_t i = 0; i < coords.size(); ++i) {
+      if (i > 0) std::cout << ", ";
+      std::cout << std::fixed << std::setprecision(2) << coords[i];
+    }
+    std::cout << "\n";
+  };
+  std::cout << "compressed grid: " << grid_x.size() << " x-planes x "
+            << grid_y.size() << " y-planes x " << grid_z.size()
+            << " z-planes = "
+            << (grid_x.size() - 1) * (grid_y.size() - 1) * (grid_z.size() - 1)
+            << " elementary cells\n";
+  print_axis("x", grid_x);
+  print_axis("y", grid_y);
+  print_axis("z", grid_z);
+  std::cout << "\n";
 
   std::cout << "common: " << result.common.size()
             << " box(es), volume=" << TotalVolume(result.common) << "\n";
@@ -194,10 +439,18 @@ int main() {
   WriteSvgFile("two_spheres_a_only.svg", BoxesToMesh(result.a_only), style_a);
   WriteSvgFile("two_spheres_b_only.svg", BoxesToMesh(result.b_only), style_b);
 
+  // Combined two-color mesh with the compressed grid's wireframe cage
+  // drawn on top, sharing the same camera projection as the meshes above.
+  const ColoredMesh inputs_colored = CombineColored(
+      {{&sphere_a, style_a.mesh_color}, {&sphere_b, style_b.mesh_color}});
+  WriteGridOverlaySvg("two_spheres_grid.svg", inputs_colored, grid_x, grid_y,
+                       grid_z, /*target_width_px=*/800.0);
+
   std::cout << "\nwrote sphere_a.obj, sphere_b.obj, two_spheres_inputs.obj, "
                "two_spheres_common.obj, two_spheres_a_only.obj, "
                "two_spheres_b_only.obj, two_spheres_result.obj, "
                "sphere_a.svg, sphere_b.svg, two_spheres_common.svg, "
-               "two_spheres_a_only.svg, two_spheres_b_only.svg\n";
+               "two_spheres_a_only.svg, two_spheres_b_only.svg, "
+               "two_spheres_grid.svg\n";
   return 0;
 }

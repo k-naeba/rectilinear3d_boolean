@@ -58,8 +58,22 @@ Two spheres A and B, each approximated as a set of boxes (a nested version
 of `rectilinear2d_boolean`'s circle-as-horizontal-strips decomposition:
 slice into z-bands, then slice each z-band's circular cross-section into
 y-strips), with `ComputeBooleanOp3d` run on the two box sets --
-`examples/two_spheres_boolean_demo.cpp`. There's no real 3D analog of the
-2D project's step-by-step grid diagram, so results are exported two ways:
+`examples/two_spheres_boolean_demo.cpp`. There's no clean 3D analog of the
+2D project's step-by-step per-cell grid diagram (a 3D grid has far too many
+cells to lay out one-by-one), but the compressed grid itself is still shown
+two ways: printed as raw coordinate values, and drawn as a wireframe cage
+over the actual geometry. Results are exported as follows:
+
+**Compressed coordinates** -- the demo prints the real
+`ns_r3b::detail::CompressXCoordinates`/`CompressYCoordinates`/
+`CompressZCoordinates` output straight to stdout, e.g.:
+
+```
+compressed grid: 24 x-planes x 19 y-planes x 7 z-planes = 2484 elementary cells
+  x (24): -4.86, -4.27, -3.75, -2.73, -2.39, -1.53, 1.14, 1.53, ...
+  y (19): -4.93, -4.33, -3.29, -2.89, -2.76, -1.84, -1.64, ...
+  z (7): -5.00, -3.33, -1.67, 0.00, 1.67, 3.33, 5.00
+```
 
 **Interactive** -- `.obj` files, viewable in
 [`obj_mesh_viewer`](../obj_mesh_viewer) (drag and drop, then orbit freely):
@@ -73,7 +87,17 @@ combined, to see the overlap in place), `two_spheres_common.obj`,
 
 | `sphere A` | `sphere B` | `common` | `a_only` | `b_only` |
 | --- | --- | --- | --- | --- |
-| <img src="docs/svg/sphere_a.svg" width="150"> | <img src="docs/svg/sphere_b.svg" width="150"> | <img src="docs/svg/two_spheres_common.svg" width="150"> | <img src="docs/svg/two_spheres_a_only.svg" width="150"> | <img src="docs/svg/two_spheres_b_only.svg" width="150"> |
+| <img src="docs/svg/sphere_a.svg" width="230"> | <img src="docs/svg/sphere_b.svg" width="230"> | <img src="docs/svg/two_spheres_common.svg" width="230"> | <img src="docs/svg/two_spheres_a_only.svg" width="230"> | <img src="docs/svg/two_spheres_b_only.svg" width="230"> |
+
+**Compressed grid, drawn on the geometry** -- `docs/svg/two_spheres_grid.svg`,
+a two-color (A blue, B orange) combined render of the same camera
+projection as the images above, with the compressed grid's own wireframe
+cage (the real `grid_x`/`grid_y`/`grid_z` values, drawn on the floor and
+two back walls of their bounding box) overlaid on top -- the fine spacing
+visible where the two spheres' box edges interleave near the overlap is
+exactly the coordinate compression at work:
+
+<img src="docs/svg/two_spheres_grid.svg" width="480">
 
 The demo also prints each region's volume, cross-checked against the box
 approximation's own volume (`common + a_only` must equal sphere A's
